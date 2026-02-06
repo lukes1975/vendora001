@@ -41,21 +41,61 @@ const allowedOrigins = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map(origin => origin.trim())
     : [];
 
+// #region agent log
+const fs = require('fs');
+const debugLogPath = 'c:\\Users\\FUOYE eLIBRARY\\Documents\\fcmcs-full-stack\\.cursor\\debug.log';
+const debugLog = (msg, data, hyp) => { try { fs.appendFileSync(debugLogPath, JSON.stringify({timestamp:Date.now(),location:'index.js',message:msg,data:data,hypothesisId:hyp,sessionId:'debug-session'})+'\n'); } catch(e){} };
+debugLog('CORS_CONFIG_INIT', {allowedOrigins, CORS_ORIGIN_ENV: process.env.CORS_ORIGIN || 'NOT_SET', NODE_ENV: process.env.NODE_ENV || 'NOT_SET'}, 'H1');
+// #endregion
+
+// Helper: Check if origin is a localhost development URL
+const isLocalhostOrigin = (origin) => {
+    if (!origin) return false;
+    return origin.startsWith('http://localhost:') || 
+           origin.startsWith('http://127.0.0.1:') ||
+           origin.startsWith('http://192.168.');
+};
+
 const corsOptions = {
     origin: (origin, callback) => {
+        // #region agent log
+        debugLog('CORS_CALLBACK', {receivedOrigin: origin, allowedOrigins, isLocalhost: isLocalhostOrigin(origin)}, 'H2,H5');
+        // #endregion
+        
         // Allow requests with no origin (mobile apps, Postman, curl)
-        if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+        // Allow all localhost/local network origins for development
+        // Allow if allowedOrigins is empty (no restrictions configured)
+        // Allow if origin is in the allowed list
+        const shouldAllow = !origin || 
+                           isLocalhostOrigin(origin) || 
+                           allowedOrigins.length === 0 || 
+                           allowedOrigins.includes(origin);
+        
+        if (shouldAllow) {
+            // #region agent log
+            debugLog('CORS_ALLOWED', {origin, reason: !origin ? 'no_origin' : isLocalhostOrigin(origin) ? 'localhost_dev' : allowedOrigins.length === 0 ? 'empty_allowlist' : 'origin_in_list'}, 'H2');
+            // #endregion
             callback(null, true);
         } else {
+            // #region agent log
+            debugLog('CORS_REJECTED', {origin, allowedOrigins}, 'H2');
+            // #endregion
             callback(new Error('Not allowed by CORS'));
         }
     },
-    methods: ['GET', 'POST'],
+    methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
     maxAge: 86400 // 24 hours
 };
 app.use(cors(corsOptions));
+
+// #region agent log
+app.use((req, res, next) => {
+    debugLog('INCOMING_REQUEST', {method: req.method, path: req.path, origin: req.headers.origin}, 'H3,H4');
+    next();
+});
+// #endregion
 
 // Parse JSON bodies
 app.use(express.json({ limit: '10kb' }));
@@ -98,7 +138,14 @@ const authLimiter = rateLimit({
         message: 'Too many authentication attempts, please try again later.'
     },
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    // #region agent log
+    skip: (req) => {
+        const skipped = req.method === 'OPTIONS';
+        debugLog('AUTH_RATE_LIMITER', {method: req.method, path: req.path, skipped}, 'H3');
+        return skipped;
+    }
+    // #endregion
 });
 
 // Compression middleware
@@ -265,6 +312,9 @@ const startServer = async () => {
             logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
             // FIX #5: Log relative paths only
             logger.info('Health check: /health');
+            // #region agent log
+            debugLog('SERVER_STARTED', {port: PORT, env: process.env.NODE_ENV || 'development'}, 'H4');
+            // #endregion
         });
     } catch (err) {
         logger.error('Failed to start server:', err.message);

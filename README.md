@@ -1,6 +1,6 @@
 # FCMCS Mobile Financial Portal - Backend API
 
-A secure, **read-only** Node.js + Express API bridge for the FCMCS (Federal Cooperative Multipurpose Credit Society) mobile financial portal. This backend serves as a secure data proxy over a legacy MSSQL database system.
+A secure, **read-only** Node.js + Express API bridge for the FCMCS (First Cooperative Multipurpose Credit Society) mobile financial portal. This backend serves as a secure data proxy over a legacy MSSQL database system.
 
 ---
 

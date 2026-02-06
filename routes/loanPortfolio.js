@@ -169,7 +169,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const loanRecords = loanRecordResult.recordset;
         
         // =================================================================
-        // QUERY 2: LOAN_REDUCING_BALANCE_ANALYSIS_TABLE - Get latest balance per loan type
+        // QUERY 2: LOAN_REDUCING_BALANCE_ANALYSIS_TABLE - Get latest balance per loan type (keyed by loan type identifier)
         // =================================================================
         const reducingBalanceQuery = `
             SELECT 
@@ -184,27 +184,30 @@ router.get('/', authenticateToken, async (req, res) => {
         
         const reducingBalanceResult = await executeQuery(reducingBalanceQuery, { pl });
         
-        // Create a map of loan type to latest reducing balance data
-        // Use the most recent TransDate for each loan type
+        // Create a map of loan type identifier to latest reducing balance data
+        // Use the most recent TransDate for each loan type identifier
         const reducingBalanceMap = new Map();
         
         if (reducingBalanceResult.recordset && reducingBalanceResult.recordset.length > 0) {
             for (const row of reducingBalanceResult.recordset) {
-                const loanType = row.LoanType;
-                const existing = reducingBalanceMap.get(loanType);
+                const loanTypeKey = row.LoanType != null ? String(row.LoanType) : null;
+                if (!loanTypeKey) continue;
+
+                const existing = reducingBalanceMap.get(loanTypeKey);
                 
                 // Keep the most recent entry per loan type
                 if (!existing || new Date(row.TransDate) > new Date(existing.TransDate)) {
-                    reducingBalanceMap.set(loanType, row);
+                    reducingBalanceMap.set(loanTypeKey, row);
                 }
             }
         }
         
         // =================================================================
-        // QUERY 3: LOAN_TYPES_TABLE - Get loan type rates
+        // QUERY 3: LOAN_TYPES_TABLE - Get loan type metadata (name + rate) keyed by URid
         // =================================================================
         const loanTypesQuery = `
             SELECT 
+                URid,
                 TypeName,
                 Rate
             FROM Loan_Types_Table
@@ -212,12 +215,18 @@ router.get('/', authenticateToken, async (req, res) => {
         
         const loanTypesResult = await executeQuery(loanTypesQuery, {});
         
-        // Create a map of loan type name to rate
-        const loanTypeRateMap = new Map();
+        // Create a map of loan type URid (identifier) to { name, rate }
+        const loanTypeInfoMap = new Map();
         
         if (loanTypesResult.recordset && loanTypesResult.recordset.length > 0) {
             for (const row of loanTypesResult.recordset) {
-                loanTypeRateMap.set(row.TypeName, Number(row.Rate) || 0);
+                const idKey = row.URid != null ? String(row.URid) : null;
+                if (!idKey) continue;
+
+                loanTypeInfoMap.set(idKey, {
+                    name: row.TypeName || null,
+                    rate: Number(row.Rate) || 0
+                });
             }
         }
         
@@ -225,13 +234,15 @@ router.get('/', authenticateToken, async (req, res) => {
         // MERGE DATA AND COMPUTE DERIVED FIELDS
         // =================================================================
         const loanPortfolio = loanRecords.map(loan => {
-            const loanType = loan.LnTyp;
-            
-            // Get reducing balance data for this loan type
-            const reducingBalance = reducingBalanceMap.get(loanType) || {};
-            
-            // Get loan type rate
-            const loanTypeRate = loanTypeRateMap.get(loanType) || 0;
+            const loanTypeKey = loan.LnTyp != null ? String(loan.LnTyp) : null;
+
+            // Get reducing balance data for this loan type identifier
+            const reducingBalance = loanTypeKey ? (reducingBalanceMap.get(loanTypeKey) || {}) : {};
+
+            // Get loan type metadata from Loan_Types_Table using URid
+            const typeInfo = loanTypeKey ? (loanTypeInfoMap.get(loanTypeKey) || {}) : {};
+            const loanTypeName = typeInfo.name || null;
+            const loanTypeRate = typeInfo.rate || 0;
             
             // Map DB columns to API fields (numbers only)
             const amountRequested = Number(loan.AmountRequired) || 0;
@@ -257,7 +268,7 @@ router.get('/', authenticateToken, async (req, res) => {
             );
             
             return {
-                loanType: loanType || null,
+                loanType: loanTypeName,
                 loanTypeRate: loanTypeRate,
                 loanPurpose: loan.Purpose_Loan || null,
                 amountRequested: amountRequested,

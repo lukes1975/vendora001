@@ -116,6 +116,46 @@ const fetchUserByPL = async (pl) => {
 };
 
 /**
+ * Fetch member contact details (phone & email) by PL from Individual_Personal_Data_Table
+ * This is used for:
+ * - First-time login phone verification
+ * - Fallback email lookup for OTP flows
+ */
+const fetchMemberContactByPL = async (pl) => {
+    const query = `
+        SELECT 
+            PhoneNo,
+            emailAdd
+        FROM Individual_Personal_Data_Table
+        WHERE IndivID = @pl
+    `;
+
+    const result = await executeQuery(query, { pl });
+    return result.recordset[0] || null;
+};
+
+/**
+ * Normalize a contact field (phone/email) from legacy DB where
+ * missing values may be stored as NULL, empty string, 0, '0', 'Nil', 'Nill', etc.
+ * Returns a clean string or empty string if effectively "no value".
+ */
+const normalizeContactValue = (value) => {
+    if (value === null || value === undefined) return '';
+
+    const str = String(value).trim();
+    if (!str) return '';
+
+    const lower = str.toLowerCase();
+
+    // Treat these sentinel values as "no value"
+    if (lower === '0' || lower === 'nil' || lower === 'nill') {
+        return '';
+    }
+
+    return str;
+};
+
+/**
  * POST /api/auth/login
  * Authenticate user with passcode
  * 
@@ -163,46 +203,114 @@ router.post('/login', async (req, res) => {
         }
         
         // =================================================================
-        // USER LOOKUP
+        // USER LOOKUP (Internetclients by UserName LIKE '%/PL;%')
+        // If no record, auto-provision from Individual_Personal_Data_Table when possible
         // =================================================================
         
-        const user = await fetchUserByPL(pl);
+        let user = await fetchUserByPL(pl);
         
         if (!user) {
-            incrementFailedAttempts(pl);
-            const remaining = MAX_ATTEMPTS - getFailedAttempts(pl);
-            
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid credentials',
-                attemptsRemaining: remaining > 0 ? remaining : 0
-            });
+            // If no Internetclients record, check if member exists in Individual_Personal_Data_Table by IndivID
+            const memberContact = await fetchMemberContactByPL(pl);
+
+            if (memberContact) {
+                // Auto-create minimal Internetclients record for this member
+                const parts = username.trim().split('/');
+                const ippis = parts[0] ? parts[0].trim() : pl;
+
+                const profileEmail = normalizeContactValue(memberContact.emailAdd);
+                const userNameForInsert = `${ippis}/${pl};${profileEmail || '0'}`;
+
+                const insertQuery = `
+                    INSERT INTO Internetclients (UserName, Passcode, Email)
+                    OUTPUT INSERTED.URid, INSERTED.UserName, INSERTED.Passcode, INSERTED.Title, INSERTED.Surname, INSERTED.OtherNames, INSERTED.Email, INSERTED.ResetOTPHash, INSERTED.ResetOTPExpiresAt
+                    VALUES (@userName, NULL, @Email)
+                `;
+
+                const insertResult = await executeQuery(insertQuery, {
+                    userName: userNameForInsert,
+                    Email: profileEmail || null
+                });
+
+                if (insertResult.recordset && insertResult.recordset.length > 0) {
+                    user = insertResult.recordset[0];
+                }
+            }
+
+            // If still no user after attempting auto-provision, treat as invalid credentials
+            if (!user) {
+                incrementFailedAttempts(pl);
+                const remaining = MAX_ATTEMPTS - getFailedAttempts(pl);
+                
+                return res.status(401).json({
+                    success: false,
+                    message: 'Invalid credentials',
+                    attemptsRemaining: remaining > 0 ? remaining : 0
+                });
+            }
         }
         
         // =================================================================
         // PASSCODE VERIFICATION
         // =================================================================
         
-        // Check if user has a passcode set
+        let isPasscodeValid = false;
+        let mustChangePasscode = false;
+
+        // First-time users: Passcode column is NULL
         if (!user.Passcode) {
-            return res.status(401).json({
-                success: false,
-                message: 'Account not activated. Please contact support.'
+            // Look up member phone number from Individual_Personal_Data_Table
+            const contact = await fetchMemberContactByPL(pl);
+            const phoneNumber = contact ? normalizeContactValue(contact.PhoneNo) : '';
+
+            // If no usable phone number is registered, block first-time login with specific message
+            if (!phoneNumber) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'your number isnt registered with the cooperative society. please contact us (the cooperative)'
+                });
+            }
+
+            // For first-time users only, compare raw passcode with raw phone number (no hashing)
+            if (passcode !== phoneNumber) {
+                incrementFailedAttempts(pl);
+                const remaining = MAX_ATTEMPTS - getFailedAttempts(pl);
+
+                return res.status(401).json({
+                    success: false,
+                    message: 'Invalid credentials',
+                    attemptsRemaining: remaining > 0 ? remaining : 0
+                });
+            }
+
+            // If phone matches, initialize Passcode with bcrypt hash of phone number
+            const hashedInitialPasscode = await bcrypt.hash(phoneNumber, SALT_ROUNDS);
+
+            await executeQuery(`
+                UPDATE Internetclients 
+                SET Passcode = @newPasscode
+                WHERE URid = @odUserId
+            `, {
+                newPasscode: hashedInitialPasscode,
+                odUserId: user.URid
             });
-        }
+
+            isPasscodeValid = true;
+            mustChangePasscode = true;
+        } else {
+            // Existing users: compare passcode with bcrypt hash
+            isPasscodeValid = await bcrypt.compare(passcode, user.Passcode);
         
-        // Compare passcode with bcrypt hash
-        const isPasscodeValid = await bcrypt.compare(passcode, user.Passcode);
-        
-        if (!isPasscodeValid) {
-            incrementFailedAttempts(pl);
-            const remaining = MAX_ATTEMPTS - getFailedAttempts(pl);
-            
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid credentials',
-                attemptsRemaining: remaining > 0 ? remaining : 0
-            });
+            if (!isPasscodeValid) {
+                incrementFailedAttempts(pl);
+                const remaining = MAX_ATTEMPTS - getFailedAttempts(pl);
+                
+                return res.status(401).json({
+                    success: false,
+                    message: 'Invalid credentials',
+                    attemptsRemaining: remaining > 0 ? remaining : 0
+                });
+            }
         }
         
         // =================================================================
@@ -236,6 +344,7 @@ router.post('/login', async (req, res) => {
                     surname: user.Surname,
                     otherNames: user.OtherNames
                 },
+                mustChangePasscode,
                 expiresIn: JWT_EXPIRES_IN
             }
         });
@@ -471,15 +580,18 @@ router.post('/forgot-passcode', async (req, res) => {
                 message: 'If the account exists, a reset code has been sent.'
             });
         }
-        
-        // Get email from Email column
-        const email = user.Email;
-        
-        if (!email) {
-            // Generic response for security
-            return res.json({
-                success: true,
-                message: 'If the account exists, a reset code has been sent.'
+
+        // Look up email from both Internetclients and Individual_Personal_Data_Table,
+        // normalizing legacy sentinel values like 0, 'Nil', 'Nill'
+        const contact = await fetchMemberContactByPL(pl);
+        const profileEmail = contact ? normalizeContactValue(contact.emailAdd) : '';
+        const userEmail = normalizeContactValue(user.Email);
+        const primaryEmail = userEmail || profileEmail;
+
+        if (!primaryEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'No email is registered for your account. Please register your email with the cooperative society in order to use the mobile app.'
             });
         }
         
@@ -519,7 +631,7 @@ router.post('/forgot-passcode', async (req, res) => {
         // =================================================================
         
         const userName = `${user.Title || ''} ${user.Surname || ''}`.trim() || 'Member';
-        await sendOTPEmail(email, otp, userName);
+        await sendOTPEmail(primaryEmail, otp, userName);
         
         // =================================================================
         // GENERIC SUCCESS RESPONSE (prevent user enumeration)
@@ -787,14 +899,17 @@ router.post('/resend-otp', async (req, res) => {
                 message: 'No active reset request found. Please use forgot-passcode first.'
             });
         }
-        
-        // Get email from Email column
-        const email = user.Email;
-        
-        if (!email) {
-            return res.json({
-                success: true,
-                message: 'If a valid request exists, a new code has been sent.'
+
+        // Look up email from both Internetclients and Individual_Personal_Data_Table
+        const contact = await fetchMemberContactByPL(pl);
+        const profileEmail = contact ? normalizeContactValue(contact.emailAdd) : '';
+        const userEmail = normalizeContactValue(user.Email);
+        const primaryEmail = userEmail || profileEmail;
+
+        if (!primaryEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'No email is registered for your account. Please register your email with the cooperative society in order to use the mobile app.'
             });
         }
         
@@ -828,7 +943,7 @@ router.post('/resend-otp', async (req, res) => {
         // =================================================================
         
         const userName = `${user.Title || ''} ${user.Surname || ''}`.trim() || 'Member';
-        await sendOTPEmail(email, otp, userName);
+        await sendOTPEmail(primaryEmail, otp, userName);
         
         res.json({
             success: true,
