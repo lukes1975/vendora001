@@ -1,0 +1,171 @@
+APPLICATION OVERVIEW (FCMCS MOBILE FINANCIAL PORTAL):
+
+- This project is a READ-ONLY mobile financial portal.
+- It does NOT modify, delete, or create financial records.
+- It acts as a secure data proxy over a legacy MSSQL (VB.NET) system.
+
+ARCHITECTURE:
+- Frontend: React Native (Rork)
+- Backend: Node.js + Express (API Bridge)
+- Database: MSSQL (legacy, source of truth)
+
+DATA FLOW (STRICT):
+1. Mobile app NEVER connects directly to MSSQL
+2. All requests go through the Node.js API
+3. API performs:
+   - Authentication
+   - Data filtering
+   - Data transformation
+4. API returns clean JSON to the mobile app
+
+SECURITY RULES:
+- HTTPS only
+- Read-only SQL queries
+- No INSERT / UPDATE / DELETE on financial tables
+- Use parameterized SQL queries ONLY
+- Credentials stored in .env
+
+RESPONSIBILITY SPLIT:
+- Frontend: UI, animations, state, API calls
+- Backend: auth, validation, SQL queries, data shaping
+- Database: untouched legacy system
+
+# LOGIN / AUTH IMPLEMENTATION
+AUTHENTICATION STRATEGY (AUTHORITATIVE):
+
+- DO NOT use the legacy encrypted Password column
+- Mobile authentication uses a NEW column: Passcode
+- Legacy Password column must remain untouched
+
+PASSCODE RULES:
+- Default passcode = member phone number(already stored in the passcode column)
+- Passcode is stored as a bcrypt HASH
+- Comparison must use bcrypt.compare()
+
+LOGIN INPUT FORMAT:
+- Frontend sends username as: "IPPIS/PL"
+  Example: "TI9875/2432"
+
+USERNAME PARSING:
+1. Split username by "/"
+2. Ignore IPPIS value
+3. Use PL number as the authoritative identifier
+
+DATABASE LOOKUP RULE:
+-auth table in db: Internetclients
+- UserName column format in DB:
+  "IPPIS/PL;EMAIL"
+- SQL lookup MUST use:
+  WHERE UserName LIKE '%/PL;%'
+- NEVER perform exact UserName match
+
+LOGIN FLOW (auth.js):
+1. Parse PL from username
+2. Fetch user row by PL
+3. Compare input passcode with stored bcrypt hash
+4. On success, return minimal user identity payload
+5. Grant read-only access
+
+OPTIONAL:
+- On first login, force passcode change
+
+# PROJECT STRUCTURE
+/fcmcs-backend
+├── /routes
+│   ├── auth.js        // login, PL parsing, bcrypt passcode auth
+│   └── dashboard.js  // shares, savings, loans (read-only)
+├── /services
+│   └── db.js         // MSSQL connection pool
+├── .env              // DB + secrets
+├── index.js          // Express bootstrap (Plesk entry)
+├── package.json      // express, mssql, bcrypt, dotenv
+└── .cursorrules      // SINGLE SOURCE OF TRUTH FOR AI
+
+PASSCODE MANAGEMENT RULES (FCMCS MOBILE FINANCIAL PORTAL):
+
+1. GENERAL PRINCIPLES
+- All passcode logic uses the NEW `Passcode` column ONLY (legacy Password untouched)
+- All passcodes are stored as bcrypt hashes
+- Backend must use parameterized queries
+- Rate-limit endpoints to prevent abuse
+- HTTPS mandatory
+
+2. FORGOT PASSCODE (OTP-BASED, NON-DESTRUCTIVE)
+
+Endpoint:
+POST /api/auth/forgot-passcode
+
+Rules Cursor MUST follow:
+
+Accept username in format IPPIS/PL
+
+Parse and extract PL
+
+Look up user by PL
+
+Generate 6-digit numeric OTP
+
+bcrypt-hash OTP
+
+Store ONLY in:
+
+ResetOTPHash
+
+ResetOTPExpiresAt (10 minutes)
+
+DO NOT modify:
+
+Passcode
+
+Password
+
+Send OTP to user email column using Resend API
+
+Always return generic response (no user existence leak)
+
+Forbidden:
+
+Do NOT send passcode
+
+Do NOT overwrite passcode
+
+Do NOT auto-login
+
+Do NOT issue JWT
+
+Response:
+
+{
+  "success": true,
+  "message": "If the account exists, a reset code has been sent."
+}
+
+
+3. RESET PASSCODE
+- Endpoint: POST /api/auth/reset-passcode
+- Input: { "token": JWT, "oldPasscode": "...", "newPasscode": "..." }
+- Flow:
+  1. Verify JWT token to get user PL
+  2. Compare oldPasscode with Passcode hash
+  3. Validate newPasscode (min 6 chars, not equal to phone number)
+  4. Hash newPasscode with bcrypt
+  5. Update Passcode column and PasscodeUpdatedAt
+- Response: success message
+
+4. RESEND FORGOT PASSCODE
+- Endpoint: POST /api/auth/resend-passcode
+- Input: { "username": "IPPIS/PL" }
+- Flow:
+  1. Lookup user by PL
+  2. Fetch the last temporary passcode (if exists and still valid)
+  3. Resend via SMS/email
+- Response: success message
+- No new passcode is generated unless the old one has expired
+
+5. SECURITY NOTES
+- Temporary passcodes expire in 30 minutes
+- Limit resend to 3 per hour per user
+- All endpoints are read-only except Passcode updates
+- Return generic messages to avoid user enumeration
+
+
