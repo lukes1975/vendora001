@@ -158,7 +158,7 @@ Response:
 - Flow:
   1. Lookup user by PL
   2. Fetch the last temporary passcode (if exists and still valid)
-  3. Resend via SMS/email
+  3. Resend via email
 - Response: success message
 - No new passcode is generated unless the old one has expired
 
@@ -168,4 +168,343 @@ Response:
 - All endpoints are read-only except Passcode updates
 - Return generic messages to avoid user enumeration
 
+FCMCS DASHBOARD RULES (STRICT)
 
+ENDPOINT
+- Route: GET /api/dashboard
+- Auth: JWT required
+- Source of truth for member identity: req.user.pl ONLY
+- Do NOT accept PL from params, query, or body
+
+DATABASE
+- Table: Pix_Table
+- Member key: AdNo = pl
+- Use MSSQL parameterized queries only
+
+COLUMNS MAPPING
+- Shares → ShrBal = ISNULL(ShrsBal, 0)
+- OrdinarySavings → SavingBal = ISNULL(SavingBal, 0)
+- RefundAccount → RefundAccount = ISNULL(BuildBal, 0)
+- RSSAccount → RSSAccount = ISNULL(SpeSavBal, 0)
+- CommodityAccount → CommodityAccount = ISNULL(EssenCoRepBal, 0)
+- DevelopmentLevy → DevelopmentLevy = ISNULL(DevBal, 0)
+- Loans → Loans = ISNULL(LoanRepBal, 0)
+
+CALCULATIONS (BACKEND ONLY)
+- totalAssets =
+    Shares +
+    OrdinarySavings +
+    RefundAccount +
+    RSSAccount +
+- totalLiability = Loans + CommodityAccount
+- netBalance = totalAssets - totalLiability
+
+RESPONSE RULES
+- Return numbers only (no strings)
+- Do NOT return raw DB column names
+- Response shape must be flat and frontend-ready
+
+RESPONSE FORMAT
+{
+  "success": true,
+  "data": {
+    "shares": number,
+    "ordinarySavings": number,
+    "refundAccount": number,
+    "rssAccount": number,
+    "commodityAccount": number,
+    "developmentLevy": number,
+    "loans": number,
+    "totalAssets": number,
+    "totalLiability": number,
+    "netBalance": number
+  }
+}
+
+CODE CONSTRAINTS
+- Use existing MSSQL pool from services/db.js
+- No new auth logic
+- No duplicated queries
+- No joins
+- No frontend assumptions
+
+SELECT
+  ISNULL(ShrsBal, 0)       AS shares,
+  ISNULL(SavingBal, 0)     AS ordinarySavings,
+  ISNULL(BuildBal, 0)      AS refundAccount,
+  ISNULL(SpeSavBal, 0)     AS rssAccount,
+  ISNULL(EssenCoRepBal, 0) AS commodityAccount,
+  ISNULL(DevBal, 0)        AS developmentLevy,
+  ISNULL(LoanRepBal, 0)    AS loans
+FROM Pix_Table
+WHERE AdNo = @pl
+
+
+## PERSONAL PROFILE ENDPOINT (READ-ONLY)
+
+Purpose:
+Expose a member’s personal profile data for the mobile app.
+This endpoint is READ-ONLY and must NEVER modify data.
+
+Endpoint:
+GET /api/profile
+
+Authentication:
+- JWT REQUIRED
+- Extract PL strictly from req.user.pl
+- NEVER accept PL from request params, query, or body
+
+Database:
+- MSSQL ONLY
+- Table: Individual_Personal_Data_Table
+- Match condition: IndivID = @pl
+- Use parameterized queries via services/db.js
+
+Returned Fields (DB → API mapping):
+- Title                → title
+- Surname              → surname
+- OtherNames           → otherNames
+- Date_Birth           → dateOfBirth
+- Sex                  → sex
+- AdmisDate            → admissionDate
+- Occupation           → occupation
+- PermanetHomeAdd      → permanentHomeAddress
+- emailAdd             → email
+- PhoneNo              → phone
+- RegistrationNo       → registrationNo
+- Next_Kin             → nextOfKin
+- MDA                  → mda
+- CourseOfStudy        → courseOfStudy
+- ServiceArea          → serviceArea
+- NOKName              → nokName
+- NOKPhoneNo           → nokPhone
+
+Response Format:
+{
+  success: true,
+  data: {
+    title,
+    surname,
+    otherNames,
+    dateOfBirth,
+    sex,
+    admissionDate,
+    occupation,
+    permanentHomeAddress,
+    email,
+    phone,
+    registrationNo,
+    nextOfKin,
+    mda,
+    courseOfStudy,
+    serviceArea,
+    nokName,
+    nokPhone
+  }
+}
+
+Error Handling:
+- If no record found → return 404
+- Do NOT leak DB errors
+- Do NOT expose table or column names
+
+Constraints:
+- NO joins
+- NO updates/inserts
+- NO formatting or transformations
+- Return raw DB values only
+- One record per PL
+
+Structure:
+- Route file: routes/profile.js
+- Mount in index.js under /api/profile
+
+
+
+## ACCOUNT SUMMARY ENDPOINT (READ-ONLY)
+
+Purpose:
+Provide a compact financial summary for a member.
+Used for overview cards and quick insights.
+
+Endpoint:
+GET /api/account-summary
+
+Authentication:
+- JWT REQUIRED
+- Extract PL strictly from req.user.pl
+- NEVER accept PL from params, query, or body
+
+Database:
+- MSSQL ONLY
+- Table: Pix_Table
+- Match condition: AdNo = @pl
+- Use parameterized queries via services/db.js
+- Single query only
+
+Column Mapping (DB → API):
+- Shares → ShrBal
+- OrdinarySavings → SavingBal
+- RefundAccount → BuildBal
+- RSSAccount → SpeSavBal
+- CommodityAccount → EssenCoRepBal
+- DevelopmentLevy → DevBal
+- Loans → LoanRepBal
+
+Backend Calculations:
+- totalAssets =
+  Shares +
+  OrdinarySavings +
+  RefundAccount +
+  RSSAccount
+
+- totalLiability =
+  Loans +
+  CommodityAccount
+
+- netBalance =
+  totalAssets - totalLiability
+
+Response Format:
+{
+  success: true,
+  data: {
+    shares,
+    ordinarySavings,
+    refundAccount,
+    rssAccount,
+    commodityAccount,
+    developmentLevy,
+    loans,
+    totalAssets,
+    totalLiability,
+    netBalance
+  }
+}
+
+Constraints:
+- Numbers only (no strings)
+- Use ISNULL for all balances
+- No raw DB column names in response
+- No joins
+- No mutations
+- One record per PL
+
+Structure:
+- Route file: routes/accountSummary.js
+- Mount path: /api/account-summary
+
+
+## LOAN PORTFOLIO ENDPOINT (READ-ONLY)
+
+Purpose:
+Expose a member’s full loan portfolio, including historical and active loan data,
+current reducing balance state, and loan metadata.
+
+Endpoint:
+GET /api/loan-portfolio
+
+Authentication:
+- JWT REQUIRED
+- Extract PL strictly from req.user.pl
+- NEVER accept PL from params, query, or body
+
+Primary Tables:
+1. Loan_Record_Table
+   - Borrower'sID = @pl
+
+2. Loan_Reducing_Balance_Analysis_Table
+   - BorrowerID = @pl
+
+3. Loan_Types_Table
+   - Join via loan type name (LnTyp → TypeName)
+
+Database Rules:
+- MSSQL ONLY
+- Parameterized queries via services/db.js
+- Multiple queries allowed
+- NO writes, NO updates, NO deletes
+
+------------------------------------
+Loan_Record_Table → API Mapping:
+------------------------------------
+- AmountRequired        → amountRequested
+- AmountApproved        → amountApproved
+- TransactionDate       → transactionDate
+- InterestRate          → monthlyInterestRate
+- TotalInterest         → totalInterest
+- Paid                  → fullyPaid (boolean)
+- PymtDrtn              → paymentDurationMonths
+- LnRtrn                → monthlyRepaymentAmount
+- IntRtrn               → monthlyInterestReturn
+- LnTyp                 → loanType
+- Purpose_Loan          → loanPurpose
+- DateOfCompletion      → completionDate
+
+------------------------------------
+Loan_Reducing_Balance_Analysis_Table → API Mapping:
+------------------------------------
+- TransDate             → lastTransactionDate
+- CurrBal               → currentOutstandingBalance
+- NextInt               → nextInterestBalance
+- LoanRepayment         → amountPaidToDate
+
+------------------------------------
+Loan_Types_Table → API Mapping:
+------------------------------------
+- TypeName              → loanType
+- Rate                  → loanTypeRate
+
+------------------------------------
+Derived / Calculated Fields:
+------------------------------------
+- totalLoanAmount = amountApproved + totalInterest
+- outstandingLoan = currentOutstandingBalance
+- loanStatus:
+    - "FULLY_PAID" if fullyPaid = 1
+    - "ACTIVE" if fullyPaid = 0 AND currentOutstandingBalance > 0
+    - "COMPLETED" if completionDate IS NOT NULL
+
+------------------------------------
+Response Format:
+------------------------------------
+{
+  success: true,
+  data: [
+    {
+      loanType,
+      loanTypeRate,
+      loanPurpose,
+      amountRequested,
+      amountApproved,
+      totalLoanAmount,
+      totalInterest,
+      monthlyInterestRate,
+      monthlyRepaymentAmount,
+      paymentDurationMonths,
+      amountPaidToDate,
+      currentOutstandingBalance,
+      nextInterestBalance,
+      loanStatus,
+      transactionDate,
+      lastTransactionDate,
+      completionDate
+    }
+  ]
+}
+
+------------------------------------
+Constraints:
+------------------------------------
+- Return array (even if one loan)
+- Numbers only (no strings)
+- Dates as raw DB dates
+- No joins that modify cardinality
+- No frontend assumptions
+- No pagination in v1
+
+------------------------------------
+Structure:
+------------------------------------
+- Route file: routes/loanPortfolio.js
+- Mount path: /api/loan-portfolio

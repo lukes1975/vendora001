@@ -24,7 +24,7 @@ This guide provides step-by-step instructions for deploying the FCMCS Backend AP
   DB_PASSWORD=your-secure-db-password
   DB_NAME=your-database-name
   JWT_SECRET=your-super-secure-jwt-secret-key-here-min-32-chars
-  CORS_ORIGIN=https://fcmcsapi.cooptran.com
+  CORS_ORIGIN=https://fcmcsapi.cooptran.com,capacitor://localhost,http://localhost:8081
   RESEND_API_KEY=your-resend-api-key-here
   EMAIL_FROM=noreplyfcmcs@vendora.business
   ```
@@ -72,12 +72,12 @@ DB_USER=your-db-username
 DB_PASSWORD=your-secure-db-password
 DB_NAME=your-database-name
 DB_ENCRYPT=true
-DB_TRUST_CERT=false
+DB_TRUST_CERT=true
 DB_POOL_MAX=20
 DB_POOL_MIN=2
 JWT_SECRET=your-super-secure-jwt-secret-key-here-min-32-chars
 JWT_EXPIRES_IN=24h
-CORS_ORIGIN=https://fcmcsapi.cooptran.com
+CORS_ORIGIN=https://fcmcs.cooptran.com,capacitor://localhost,http://localhost:8081
 RESEND_API_KEY=your-resend-api-key-here
 EMAIL_FROM=noreplyfcmcs@vendora.business
 LOG_LEVEL=info
@@ -188,6 +188,10 @@ npm ls --depth=0  # Check for missing dependencies
 - Check API key permissions
 - Test email service independently
 
+**6. Self-Signed Certificate Error**
+- Set `DB_TRUST_CERT=true` in environment variables
+- This is required for HostGator and similar hosting providers
+- The error "self-signed certificate" indicates this setting needs to be enabled
 ### Log Locations
 - **Application logs**: `logs/combined.log`, `logs/error.log`
 - **PM2 logs**: `~/.pm2/logs/`

@@ -18,6 +18,10 @@ const { getPool, closePool } = require('./services/db');
 
 // Route imports
 const authRoutes = require('./routes/auth');
+const dashboardRoutes = require('./routes/dashboard');
+const profileRoutes = require('./routes/profile');
+const accountSummaryRoutes = require('./routes/accountSummary');
+const loanPortfolioRoutes = require('./routes/loanPortfolio');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,9 +30,26 @@ const PORT = process.env.PORT || 3000;
 // SECURITY MIDDLEWARE
 // =============================================================================
 
-// CORS configuration
+// Disable x-powered-by header (no reason to advertise Express)
+app.disable('x-powered-by');
+
+// Trust proxy (required for Plesk/IIS environments)
+app.set('trust proxy', 1);
+
+// CORS configuration - FIX #1: Proper origin handling
+const allowedOrigins = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map(origin => origin.trim())
+    : [];
+
 const corsOptions = {
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: (origin, callback) => {
+        // Allow requests with no origin (mobile apps, Postman, curl)
+        if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
@@ -42,16 +63,9 @@ app.use(express.json({ limit: '10kb' }));
 // Parse URL-encoded bodies
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
-// Security headers with Helmet
+// Security headers with Helmet - FIX #2: Disable CSP for API-only service
 app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'"],
-            scriptSrc: ["'self'"],
-            imgSrc: ["'self'", "data:", "https:"],
-        },
-    },
+    contentSecurityPolicy: false, // CSP is for browsers, not APIs
     hsts: {
         maxAge: 31536000,
         includeSubDomains: true,
@@ -59,7 +73,7 @@ app.use(helmet({
     }
 }));
 
-// Rate limiting
+// Rate limiting - FIX #3: Remove redundant keyGenerator (trust proxy handles it)
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 100, // limit each IP to 100 requests per windowMs
@@ -69,6 +83,10 @@ const limiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => {
+        // Skip rate limiting for health checks
+        return req.path === '/health' || req.path === '/';
+    }
 });
 
 // Stricter rate limiting for auth endpoints
@@ -80,7 +98,7 @@ const authLimiter = rateLimit({
         message: 'Too many authentication attempts, please try again later.'
     },
     standardHeaders: true,
-    legacyHeaders: false,
+    legacyHeaders: false
 });
 
 // Compression middleware
@@ -88,6 +106,10 @@ app.use(compression());
 
 // Apply rate limiting
 app.use('/api/auth', authLimiter);
+app.use('/api/dashboard', limiter);
+app.use('/api/profile', limiter);
+app.use('/api/account-summary', limiter);
+app.use('/api/loan-portfolio', limiter);
 app.use(limiter);
 
 // Request logging with Winston
@@ -103,7 +125,7 @@ app.use((req, res, next) => {
 app.get('/health', async (req, res) => {
     try {
         const pool = await getPool();
-        const result = await pool.request().query('SELECT 1 AS status');
+        await pool.request().query('SELECT 1 AS status');
         
         res.json({
             status: 'healthy',
@@ -120,14 +142,81 @@ app.get('/health', async (req, res) => {
 });
 
 // =============================================================================
+// ROOT ENDPOINT (for basic connectivity test)
+// =============================================================================
+
+app.get('/', (req, res) => {
+    res.json({
+        status: 'ok',
+        service: 'FCMCS backend',
+        time: new Date().toISOString()
+    });
+});
+
+// =============================================================================
+// PING ENDPOINT (simple response test)
+// =============================================================================
+
+app.get('/ping', (req, res) => {
+    res.json({
+        status: 'pong',
+        message: 'Server is responding',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// =============================================================================
+// DEBUG ENDPOINT - FIX #4: Development only
+// =============================================================================
+
+if (process.env.NODE_ENV !== 'production') {
+    app.get('/debug', async (req, res) => {
+        try {
+            const pool = await getPool();
+            await pool.request().query('SELECT 1 AS test');
+
+            res.json({
+                status: 'debug_ok',
+                database: 'connected',
+                routes: {
+                    root: '/',
+                    health: '/health',
+                    ping: '/ping',
+                    auth_test: '/api/auth/test',
+                    auth_login: '/api/auth/login'
+                },
+                timestamp: new Date().toISOString()
+            });
+        } catch (dbError) {
+            res.status(500).json({
+                status: 'debug_error',
+                database: 'failed',
+                error: dbError.message,
+                error_code: dbError.code,
+                timestamp: new Date().toISOString()
+            });
+        }
+    });
+}
+
+// =============================================================================
 // API ROUTES
 // =============================================================================
 
 // Authentication routes
 app.use('/api/auth', authRoutes);
 
-// Future: Dashboard routes (shares, savings, loans)
-// app.use('/api/dashboard', dashboardRoutes);
+// Dashboard routes (shares, savings, loans)
+app.use('/api/dashboard', dashboardRoutes);
+
+// Profile routes (personal data)
+app.use('/api/profile', profileRoutes);
+
+// Account summary routes (compact financial overview)
+app.use('/api/account-summary', accountSummaryRoutes);
+
+// Loan portfolio routes (full loan data)
+app.use('/api/loan-portfolio', loanPortfolioRoutes);
 
 // =============================================================================
 // ERROR HANDLING
@@ -152,7 +241,7 @@ app.use((err, req, res, next) => {
     });
 
     // Don't leak error details in production
-    const isDev = process.env.NODE_ENV === 'development';
+    const isDev = process.env.NODE_ENV !== 'production';
 
     res.status(err.status || 500).json({
         success: false,
@@ -174,10 +263,11 @@ const startServer = async () => {
         app.listen(PORT, () => {
             logger.info(`FCMCS API running on port ${PORT}`);
             logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
-            logger.info(`Health check: http://localhost:${PORT}/health`);
+            // FIX #5: Log relative paths only
+            logger.info('Health check: /health');
         });
     } catch (err) {
-        console.error('❌ Failed to start server:', err.message);
+        logger.error('Failed to start server:', err.message);
         process.exit(1);
     }
 };

@@ -31,6 +31,18 @@ const { sendOTPEmail, sendPasscodeResetConfirmation } = require('../services/ema
 
 const router = express.Router();
 
+// =============================================================================
+// AUTH HEALTH CHECK (always available)
+// =============================================================================
+
+router.get('/status', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Auth routes are loaded and working',
+        timestamp: new Date().toISOString()
+    });
+});
+
 // JWT configuration
 const JWT_SECRET = process.env.JWT_SECRET || 'fcmcs-default-secret-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
@@ -967,5 +979,28 @@ router.post('/reset-passcode', async (req, res) => {
         });
     }
 });
+
+// =============================================================================
+// DEBUG ROUTE (for testing auth routing) - Development only
+// =============================================================================
+
+if (process.env.NODE_ENV !== 'production') {
+    router.get('/test', (req, res) => {
+        res.json({
+            success: true,
+            message: 'Auth routes are working',
+            available_endpoints: [
+                'POST /api/auth/login',
+                'POST /api/auth/verify',
+                'POST /api/auth/change-passcode',
+                'POST /api/auth/forgot-passcode',
+                'POST /api/auth/verify-otp',
+                'POST /api/auth/resend-otp',
+                'POST /api/auth/reset-passcode'
+            ],
+            timestamp: new Date().toISOString()
+        });
+    });
+}
 
 module.exports = router;
