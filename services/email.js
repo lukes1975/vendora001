@@ -12,7 +12,7 @@ const { Resend } = require('resend');
 
 // Initialize Resend client
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const FROM_EMAIL = process.env.EMAIL_FROM || 'noreplyfcmcs@vendora.business';
+const FROM_EMAIL = process.env.EMAIL_FROM || 'noreplyfcmcs@camagtech.com';
 
 let resend = null;
 
